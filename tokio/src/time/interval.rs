@@ -1,6 +1,7 @@
 use crate::future::poll_fn;
 use crate::time::{sleep_until, Duration, Instant, Sleep};
 
+use pin_project_lite::pin_project;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -106,33 +107,38 @@ pub fn interval_at(start: Instant, period: Duration) -> Interval {
     }
 }
 
-/// Stream returned by [`interval`](interval) and [`interval_at`](interval_at).
-///
-/// This type only implements the [`Stream`] trait if the "stream" feature is
-/// enabled.
-///
-/// [`Stream`]: trait@crate::stream::Stream
-#[derive(Debug)]
-pub struct Interval {
-    /// Future that completes the next time the `Interval` yields a value.
-    delay: Sleep,
+pin_project! {
+    /// Stream returned by [`interval`](interval) and [`interval_at`](interval_at).
+    ///
+    /// This type only implements the [`Stream`] trait if the "stream" feature is
+    /// enabled.
+    ///
+    /// [`Stream`]: trait@crate::stream::Stream
+    #[derive(Debug)]
+    pub struct Interval {
+        // Future that completes the next time the `Interval` yields a value.
+        #[pin]
+        delay: Sleep,
 
-    /// The duration between values yielded by `Interval`.
-    period: Duration,
+        // The duration between values yielded by `Interval`.
+        period: Duration,
+    }
 }
 
 impl Interval {
-    fn poll_tick(&mut self, cx: &mut Context<'_>) -> Poll<Instant> {
+    fn poll_tick(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Instant> {
+        let mut me = self.project();
+
         // Wait for the delay to be done
-        ready!(Pin::new(&mut self.delay).poll(cx));
+        ready!(me.delay.as_mut().poll(cx));
 
         // Get the `now` by looking at the `delay` deadline
-        let now = self.delay.deadline();
+        let now = me.delay.deadline();
 
         // The next interval value is `duration` after the one that just
         // yielded.
-        let next = now + self.period;
-        self.delay.reset(next);
+        let next = now + *me.period;
+        me.delay.as_mut().reset(next);
 
         // Return the current instant
         Poll::Ready(now)
@@ -158,8 +164,8 @@ impl Interval {
     ///     // approximately 20ms have elapsed.
     /// }
     /// ```
-    pub async fn tick(&mut self) -> Instant {
-        poll_fn(|cx| self.poll_tick(cx)).await
+    pub async fn tick(mut self: Pin<&mut Self>) -> Instant {
+        poll_fn(move |cx| self.as_mut().poll_tick(cx)).await
     }
 }
 
@@ -167,7 +173,7 @@ impl Interval {
 impl crate::stream::Stream for Interval {
     type Item = Instant;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Instant>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Instant>> {
         Poll::Ready(Some(ready!(self.poll_tick(cx))))
     }
 }
